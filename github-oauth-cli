@@ -1,0 +1,164 @@
+#!/usr/bin/env node
+
+let crypto = require('crypto');
+let restify = require('restify');
+let request = require('request');
+let program = require('commander');
+let opn = require('opn');
+
+program
+  .option('--client_id <github client id>', 'Client ID', '')
+  .option('--client_secret <github client secret>', 'Client Secret', '')
+  .option('--github_org <github org url>', 'ex: https://github.com', 'https://github.com')
+  .option('--scopes <space separated list of scopes>', 'Space separated list of scopes', 'user repo')
+  .option('--redirect_uri <redirect uri>', 'redirect uri', 'http://localhost:8080/oauth/redirect')
+  .parse(process.argv);
+
+if (!program.client_id || !program.client_secret || !program.github_org || !program.scopes || !program.redirect_uri) {
+  program.help();
+  process.exit(1);
+}
+
+const server = restify.createServer({name: 'app', version: '1.0.0'});
+
+server.use(restify.plugins.acceptParser(server.acceptable));
+server.use(restify.plugins.queryParser());
+server.use(restify.plugins.bodyParser());
+server.listen(8080);
+
+server.get('/oauth/redirect', githubRedirectHandler);
+
+/*
+* Step 1: generate authorization code for exchange token
+* Send GET request to IDP(github) authorization server path - /login/oauth/authorize,
+* waiting for the call back to http://localhost:8080/redirect, which will be handled by function - githubRedirectHandler
+* */
+console.log('\n' + "=====> Step 1: generate authorization code for exchange token");
+
+let state = uuid();
+
+let authorizeUrl = buildAuthorizeUrl();
+console.log('About to call Authorize URL: ' + authorizeUrl + '\n');
+
+console.log('press any key to continue...');
+keypress().then(() => {
+  // Step 1: call authorize endpoint where user will authenticate to Okta
+  opn(authorizeUrl);
+});
+
+/*
+* Step 2: github redirects back to app with an authorization code
+* Setup the post form, and ready to get access token 
+* */
+async function githubRedirectHandler(req, res, next) {
+  console.log('\n' +  "=====> Step 2: github redirects back to app with an authorization code");
+  
+  let body = '<html lang="en"><body><h4>GitHub OAuth2 authorize complete. ' + 'You can close this tab.</h4></body></html>';
+  res.writeHead(200, {
+    'Content-Length': Buffer.byteLength(body),
+    'Content-Type': 'text/html'
+  });
+  res.write(body);
+  res.end();
+
+  console.log('\nGot code (α): ' + req.query.code + '\n');
+
+  console.log('press any key to continue...');
+  await keypress();
+  
+  let form = {
+    redirect_uri: program.redirect_uri,
+    client_id: program.client_id,
+    client_secret: program.client_secret,
+    code: req.query.code,
+    state: state
+  };
+
+  console.log('\nCalling /login/oauth/access_token endpoint with:');
+  console.log('client_id: ' + form.client_id);
+  console.log('code: ' + form.code + '\n');
+
+  console.log(
+    'Here is the complete form post that will be sent to the /login/oauth/access_token endpoint:'
+  );
+  console.log(form);
+  console.log();
+
+  console.log('press any key to continue...');
+  await keypress();
+
+  /*
+  * Step 3: get access token
+  * Setup the post form, and ready to get access token 
+  * */
+  console.log('\n' + "=====> Step 3: get access token with authorization code");
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = 0; // Disable TLS for demo
+  request.post(
+    {
+      url: program.github_org + '/login/oauth/access_token',
+      json: true,
+      form: form
+    },
+    function (err, httpResponse, body) {
+      tokenResponseHandler(body);
+      return next();
+    }
+  );
+}
+
+async function tokenResponseHandler(tokenResponse) {
+  console.log('\nGot token response:');
+  console.log(tokenResponse);
+  console.log();
+
+  console.log('press any key to continue...');
+  await keypress();
+
+  /*
+  * Step 4: get userinfo with access token
+  * */
+  console.log('\n' + "=====> Step 4: get user info with access token by calling /user endpoint");
+  request.get(
+    {
+      url: "https://api.github.com/user",
+      json: true,
+      headers : {
+        "Authorization": "token " + tokenResponse.access_token,
+        "User-Agent": "github-oauth-apps-demo"
+      },
+    },
+    function (err, httpResponse, body) {
+      console.log(body);
+      process.exit(0);
+    }
+  );
+}
+
+function uuid() {
+  function s4() {
+    return Math.floor((1 + Math.random()) * 0x10000)
+      .toString(16)
+      .substring(1);
+  }
+
+  return s4() + '_' + s4() + '_' + s4() + '_' + s4() + '_' +
+    s4() + '_' + s4() + '_' + s4() + '_' + s4() + '_' +
+    s4() + '_' + s4() + '_' + s4()
+}
+
+// https://developer.github.com/apps/building-oauth-apps/authorizing-oauth-apps/
+function buildAuthorizeUrl() {
+  return program.github_org + '/login/oauth/authorize?' +
+    'client_id=' + program.client_id + '&' +
+    'scope=' + program.scopes + '&' +
+    'redirect_uri=' + program.redirect_uri + '&' +
+    'state=' + state;
+}
+
+async function keypress() {
+  process.stdin.setRawMode(true)
+  return new Promise(resolve => process.stdin.once('data', () => {
+    process.stdin.setRawMode(false)
+    resolve()
+  }))
+}
